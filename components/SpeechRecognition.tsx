@@ -45,6 +45,12 @@ export default function SpeechRecognition({
   const pulseScale = useRef(new Animated.Value(1)).current;
   const pulseOpacity = useRef(new Animated.Value(0.3)).current;
   const micScale = useRef(new Animated.Value(1)).current;
+  
+  // Silence timeout tracking
+  const silenceTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const hasReceivedSpeechRef = useRef<boolean>(false); // Track if we've received any speech
+  const SILENCE_TIMEOUT_MS = 2000; // 2 seconds
+  const SILENCE_THRESHOLD = 5; // Volume threshold below which we consider it silence (0-100)
 
   // Animate pulse when listening
   useEffect(() => {
@@ -148,11 +154,17 @@ export default function SpeechRecognition({
     if (event.results && event.results.length > 0) {
       const latestResult = event.results[event.results.length - 1];
       if (latestResult.transcript) {
-        setTranscript(latestResult.transcript);
+        const newTranscript = latestResult.transcript;
+        setTranscript(newTranscript);
+        
+        // Mark that we've received speech
+        if (newTranscript.trim().length > 0) {
+          hasReceivedSpeechRef.current = true;
+        }
         
         // Send interim results to parent for immediate display
         if (onInterimResult && !event.isFinal) {
-          onInterimResult(latestResult.transcript);
+          onInterimResult(newTranscript);
         }
       }
       
@@ -160,6 +172,12 @@ export default function SpeechRecognition({
       if (event.isFinal && latestResult.transcript) {
         const finalText = latestResult.transcript.trim();
         if (finalText) {
+          // Clear silence timeout since we got a final result
+          if (silenceTimeoutRef.current) {
+            clearTimeout(silenceTimeoutRef.current);
+            silenceTimeoutRef.current = null;
+          }
+          
           // Small delay to ensure state is updated
           setTimeout(() => {
             onTranscriptionComplete(finalText);
@@ -175,17 +193,50 @@ export default function SpeechRecognition({
       // Normalize volume to 0-1 range for animation
       const normalizedVolume = Math.min(Math.max(event.value / 100, 0), 1);
       setVolume(normalizedVolume);
+      
+      // Handle silence timeout
+      if (isListening) {
+        const volumeValue = event.value;
+        
+        // Clear existing timeout
+        if (silenceTimeoutRef.current) {
+          clearTimeout(silenceTimeoutRef.current);
+          silenceTimeoutRef.current = null;
+        }
+        
+        // If volume is below threshold (silence detected)
+        if (volumeValue < SILENCE_THRESHOLD) {
+          // Only start timeout if we have received speech (user has spoken)
+          if (hasReceivedSpeechRef.current) {
+            silenceTimeoutRef.current = setTimeout(() => {
+              // Silence timeout reached - stop listening
+              stopListening();
+            }, SILENCE_TIMEOUT_MS);
+          }
+        }
+        // If volume is above threshold (voice detected), timeout is already cleared above
+      }
     }
   });
 
   useSpeechRecognitionEvent('end', () => {
     setIsListening(false);
     setVolume(0);
+    // Clear silence timeout when recording ends
+    if (silenceTimeoutRef.current) {
+      clearTimeout(silenceTimeoutRef.current);
+      silenceTimeoutRef.current = null;
+    }
   });
 
   useSpeechRecognitionEvent('error', (event) => {
     setIsListening(false);
     setError(event.error || 'Speech recognition error');
+    // Clear silence timeout on error
+    if (silenceTimeoutRef.current) {
+      clearTimeout(silenceTimeoutRef.current);
+      silenceTimeoutRef.current = null;
+    }
   });
 
   const startListening = async () => {
@@ -193,6 +244,15 @@ export default function SpeechRecognition({
       setError(null);
       setTranscript('');
       setVolume(0);
+      
+      // Reset speech detection tracking
+      hasReceivedSpeechRef.current = false;
+      
+      // Clear any existing silence timeout
+      if (silenceTimeoutRef.current) {
+        clearTimeout(silenceTimeoutRef.current);
+        silenceTimeoutRef.current = null;
+      }
 
       await ExpoSpeechRecognitionModule.start({
         lang: 'en-US',
@@ -207,6 +267,12 @@ export default function SpeechRecognition({
 
   const stopListening = async () => {
     try {
+      // Clear silence timeout
+      if (silenceTimeoutRef.current) {
+        clearTimeout(silenceTimeoutRef.current);
+        silenceTimeoutRef.current = null;
+      }
+      
       await ExpoSpeechRecognitionModule.stop();
       setIsListening(false);
     } catch (err: any) {
@@ -279,7 +345,7 @@ export default function SpeechRecognition({
         {isGeneratingResponse
           ? 'Generating response...'
           : isListening
-          ? 'Listening...'
+          ? 'Listening... (will stop after 2s silence)'
           : disabled && llmStatus && !llmStatus.isReady
           ? llmStatus.message || 'LLM not ready'
           : transcript

@@ -1,22 +1,22 @@
-import React, { useState, useEffect } from 'react';
-import { StyleSheet, Text, View, Button, ScrollView, ActivityIndicator, Platform, KeyboardAvoidingView, Alert, TouchableOpacity } from 'react-native';
+import React, { useState, useEffect, useRef } from 'react';
+import { StyleSheet, Text, View, ScrollView, ActivityIndicator, Platform, KeyboardAvoidingView, Alert, TouchableOpacity } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter, useFocusEffect } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { File, Directory, Paths } from 'expo-file-system';
-import { setAudioModeAsync, createAudioPlayer, AudioPlayer } from 'expo-audio';
-import { VOICES, getCombinedVoices } from '../kokoro/voices';
+import { setAudioModeAsync } from 'expo-audio';
+import { VOICES } from '../kokoro/voices';
 import KokoroOnnx from '../kokoro/kokoroOnnx';
 import { MODELS, getDownloadedModels, downloadModel, isModelDownloaded } from '../kokoro/models';
 import { useTTSStore } from '../store/ttsStore';
 import SpeechRecognition from '../components/SpeechRecognition';
 import llmService from '../kokoro/llmService';
+import conversationDb from '../store/conversationDb';
 
 export default function Index() {
   const router = useRouter();
   const {
     selectedVoice,
-    setSelectedVoice,
     selectedModelId,
     setSelectedModelId,
     currentModelId,
@@ -34,18 +34,8 @@ export default function Index() {
     isLLMMode,
   } = useTTSStore();
 
-  const [text, setText] = useState("Hello, this is a test of the Kokoro text to speech system running on Expo with ONNX Runtime.");
   const [error, setError] = useState<string | null>(null);
-  const [sound, setSound] = useState<AudioPlayer | null>(null);
-  const [isPlaying, setIsPlaying] = useState(false);
   const [isGeneratingAudio, setIsGeneratingAudio] = useState(false);
-  const [isStreaming, setIsStreaming] = useState(false);
-  const [tokensPerSecond, setTokensPerSecond] = useState(0);
-  const [streamProgress, setStreamProgress] = useState(0);
-  const [streamDuration, setStreamDuration] = useState(0);
-  const [streamPosition, setStreamPosition] = useState(0);
-  const [timeToFirstToken, setTimeToFirstToken] = useState(0);
-  const [streamingPhonemes, setStreamingPhonemes] = useState("");
   
   // LLM state
   const [isLLMInitializing, setIsLLMInitializing] = useState(false);
@@ -54,16 +44,56 @@ export default function Index() {
   const [isGeneratingResponse, setIsGeneratingResponse] = useState(false);
   const [conversationHistory, setConversationHistory] = useState<Array<{ role: 'user' | 'assistant'; content: string }>>([]);
   const [interimTranscript, setInterimTranscript] = useState<string>('');
+  const conversationScrollViewRef = useRef<ScrollView>(null);
 
   // TTS Model initialization state
   const [isInitializingModel, setIsInitializingModel] = useState(false);
   const [isDownloadingTTSModel, setIsDownloadingTTSModel] = useState(false);
 
-  // Initialize models and LLM on mount
+  // Initialize models, LLM, and load conversations on mount
   useEffect(() => {
     initializeModels();
     initializeLLM();
+    loadConversations();
   }, []);
+
+  // Load conversations from database
+  const loadConversations = async () => {
+    try {
+      await conversationDb.initialize();
+      const messages = await conversationDb.getAllMessages();
+      setConversationHistory(messages);
+      console.log('[App] ✓ Loaded', messages.length, 'messages from database');
+    } catch (error) {
+      console.error('[App] ✗ Error loading conversations:', error);
+    }
+  };
+
+  // Helper function to add message to both state and database
+  const addMessageToConversation = async (role: 'user' | 'assistant', content: string) => {
+    // Add to state immediately
+    setConversationHistory(prev => [...prev, { role, content }]);
+    
+    // Save to database
+    try {
+      await conversationDb.initialize();
+      await conversationDb.addMessage(role, content);
+    } catch (error) {
+      console.error('[App] ✗ Error saving message to database:', error);
+    }
+  };
+
+  // Helper function to clear conversation from both state and database
+  const clearConversation = async () => {
+    try {
+      await conversationDb.clearAllMessages();
+      setConversationHistory([]);
+      Alert.alert('Success', 'Conversation history cleared');
+    } catch (error) {
+      console.error('[App] Error clearing conversations:', error);
+      Alert.alert('Error', 'Failed to clear conversation history');
+    }
+  };
 
   // Initialize models - download if needed and set as active
   const initializeModels = async () => {
@@ -198,14 +228,17 @@ export default function Index() {
     }
     
     setupAudio();
-    
-    return () => {
-      // Clean up sound when component unmounts
-      if (sound) {
-        sound.release();
-      }
-    };
   }, []);
+
+  // Auto-scroll conversation when new messages are added
+  useEffect(() => {
+    if (conversationHistory.length > 0 && conversationScrollViewRef.current) {
+      // Use setTimeout to ensure the content has been rendered before scrolling
+      setTimeout(() => {
+        conversationScrollViewRef.current?.scrollToEnd({ animated: true });
+      }, 100);
+    }
+  }, [conversationHistory, interimTranscript]);
 
 
   const checkDownloadedVoices = async () => {
@@ -251,182 +284,19 @@ export default function Index() {
   };
 
 
-  const generateSpeech = async () => {
-    if (!isModelInitialized) {
-      Alert.alert('Model not initialized', 'Please wait for the model to initialize or download it first.');
-      return;
-    }
-
-    if (!isVoiceAvailable(selectedVoice)) {
-      Alert.alert('Voice not available', `Please download or select the "${getVoiceDisplayName(selectedVoice)}" voice first.`);
-      return;
-    }
-
-    try {
-      setIsGeneratingAudio(true);
-      setError(null);
-      
-      let textToSpeak = text;
-      
-      // If in LLM mode, send text to LLM first
-      if (isLLMMode) {
-        if (!isLLMReady) {
-          Alert.alert('LLM Not Ready', 'Please wait for the LLM to initialize before asking questions.');
-          setIsGeneratingAudio(false);
-          return;
-        }
-        
-        try {
-          setIsGeneratingResponse(true);
-          
-          // Add user message to conversation
-          const userMessage = { role: 'user' as const, content: text };
-          const updatedHistory = [...conversationHistory, userMessage];
-          setConversationHistory(updatedHistory);
-          
-          // Generate LLM response
-          const response = await llmService.generateResponse(text, conversationHistory);
-          
-          // Add assistant response to conversation
-          const assistantMessage = { role: 'assistant' as const, content: response };
-          setConversationHistory(prev => [...prev, assistantMessage]);
-          
-          // Use LLM response as text to speak
-          textToSpeak = response;
-        } catch (err: any) {
-          console.error('Error in LLM flow:', err);
-          setError(err.message || 'Failed to generate response. Please try again.');
-          setIsGeneratingAudio(false);
-          setIsGeneratingResponse(false);
-          return;
-        } finally {
-          setIsGeneratingResponse(false);
-        }
-      }
-      
-      // Stop any existing streaming audio
-      if (sound) {
-        sound.release();
-        setSound(null);
-        setIsPlaying(false);
-      }
-      
-      setIsStreaming(true);
-      setStreamProgress(0);
-      setTokensPerSecond(0);
-      setTimeToFirstToken(0);
-      setStreamingPhonemes("");
-      
-      // Generate and stream audio
-      const progressCallback = (status: {
-        progress: number;
-        tokensPerSecond: number;
-        position: number;
-        duration: number;
-        phonemes: string;
-      }) => {
-        setStreamProgress(status.progress);
-        setTokensPerSecond(status.tokensPerSecond);
-        setStreamPosition(status.position);
-        setStreamDuration(status.duration);
-        setStreamingPhonemes(status.phonemes);
-      };
-      const result = await KokoroOnnx.streamAudio(
-        textToSpeak,
-        selectedVoice,
-        speed,
-        progressCallback as any
-      );
-      
-      // Update initial metrics
-      setTokensPerSecond(result.tokensPerSecond);
-      setTimeToFirstToken(result.timeToFirstToken);
-      
-    } catch (err) {
-      console.error('Error generating speech:', err);
-      setError('Error generating speech. Please try again.');
-    } finally {
-      setIsGeneratingAudio(false);
-    }
-  };
-
-  const playSound = async () => {
-    if (!sound) {
-      Alert.alert('No audio', 'Please generate audio first.');
-      return;
-    }
-
-    try {
-      if (isPlaying) {
-        sound.pause();
-        setIsPlaying(false);
-      } else {
-        sound.play();
-        setIsPlaying(true);
-      }
-    } catch (err) {
-      console.error('Error playing sound:', err);
-      setError('Error playing sound. Please try again.');
-    }
-  };
-
-  const stopSound = async () => {
-    if (!sound) {
-      return;
-    }
-
-    try {
-      sound.pause();
-      sound.seekTo(0);
-      setIsPlaying(false);
-    } catch (err) {
-      console.error('Error stopping sound:', err);
-      setError('Error stopping sound. Please try again.');
-    }
-  };
-
   // Helper function to generate and play speech
   const generateAndPlaySpeech = async (textToSpeak: string) => {
     try {
       setIsGeneratingAudio(true);
       
-      // Stop any existing streaming audio
-      if (sound) {
-        sound.release();
-        setSound(null);
-        setIsPlaying(false);
-      }
-      
-      setIsStreaming(true);
-      setStreamProgress(0);
-      setTokensPerSecond(0);
-      setTimeToFirstToken(0);
-      setStreamingPhonemes("");
-      
       // Generate and stream audio
-      const progressCallback = (status: {
-        progress: number;
-        tokensPerSecond: number;
-        position: number;
-        duration: number;
-        phonemes: string;
-      }) => {
-        setStreamProgress(status.progress);
-        setTokensPerSecond(status.tokensPerSecond);
-        setStreamPosition(status.position);
-        setStreamDuration(status.duration);
-        setStreamingPhonemes(status.phonemes);
-      };
-      const result = await KokoroOnnx.streamAudio(
+      await KokoroOnnx.streamAudio(
         textToSpeak,
         selectedVoice,
         speed,
-        progressCallback as any
+        () => {} // Progress callback (not used currently)
       );
       
-      // Update initial metrics
-      setTokensPerSecond(result.tokensPerSecond);
-      setTimeToFirstToken(result.timeToFirstToken);
       setIsGeneratingAudio(false);
     } catch (err) {
       console.error('Error generating speech:', err);
@@ -497,7 +367,7 @@ export default function Index() {
                 {conversationHistory.length > 0 && (
                   <TouchableOpacity
                     style={styles.clearButtonInline}
-                    onPress={() => setConversationHistory([])}
+                    onPress={clearConversation}
                   >
                     <Text style={styles.clearButtonText}>Clear</Text>
                   </TouchableOpacity>
@@ -505,6 +375,7 @@ export default function Index() {
               </View>
               {conversationHistory.length > 0 ? (
                 <ScrollView 
+                  ref={conversationScrollViewRef}
                   style={styles.conversationContainer} 
                   nestedScrollEnabled
                   showsVerticalScrollIndicator={true}
@@ -570,20 +441,30 @@ export default function Index() {
             }}
             onTranscriptionComplete={async (transcribedText) => {
               setInterimTranscript('');
-              setText(transcribedText);
               setError(null);
               
               // Update the last message (which should be the interim one) with the final text
+              // Interim messages are not saved to DB, only final ones
+              let updatedHistory: Array<{ role: 'user' | 'assistant'; content: string }> = [];
               setConversationHistory(prev => {
                 const lastMessage = prev[prev.length - 1];
                 if (lastMessage && lastMessage.role === 'user') {
                   // Replace the interim message with the final one
-                  return [...prev.slice(0, -1), { role: 'user' as const, content: transcribedText }];
+                  updatedHistory = [...prev.slice(0, -1), { role: 'user' as const, content: transcribedText }];
                 } else {
                   // Add new message if somehow there wasn't an interim one
-                  return [...prev, { role: 'user' as const, content: transcribedText }];
+                  updatedHistory = [...prev, { role: 'user' as const, content: transcribedText }];
                 }
+                return updatedHistory;
               });
+              
+              // Save the final user message to database
+              try {
+                await conversationDb.initialize();
+                await conversationDb.addMessage('user', transcribedText);
+              } catch (err) {
+                console.error('[App] Error saving user message:', err);
+              }
               
               if (isLLMMode) {
                 // LLM Mode: Send to LLM, then speak response
@@ -606,15 +487,13 @@ export default function Index() {
                 try {
                   setIsGeneratingResponse(true);
                   
-                  // Generate LLM response (pass history without the new user message since generateResponse adds it)
-                  // Get the current history (which should have the final user message)
-                  const historyForLLM = conversationHistory.slice(0, -1); // Remove the last user message since generateResponse adds it
+                  // Get history for LLM (without the user message we just added, since generateResponse adds it)
+                  const historyForLLM = updatedHistory.slice(0, -1);
                   
                   const response = await llmService.generateResponse(transcribedText, historyForLLM);
                   
                   // Add assistant response to conversation
-                  const assistantMessage = { role: 'assistant' as const, content: response };
-                  setConversationHistory(prev => [...prev, assistantMessage]);
+                  await addMessageToConversation('assistant', response);
                   
                   // Speak the response using Kokoro TTS
                   await generateAndPlaySpeech(response);
@@ -700,37 +579,6 @@ const styles = StyleSheet.create({
     color: '#636366',
     flex: 1,
   },
-  voiceSelectorCard: {
-    backgroundColor: '#f2f2f7',
-    borderRadius: 8,
-    padding: 12,
-    borderWidth: 1,
-    borderColor: '#e5e5ea',
-  },
-  voiceSelectorContent: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-  },
-  voiceSelectorTextContainer: {
-    flex: 1,
-    marginRight: 8,
-  },
-  selectedVoiceName: {
-    fontSize: 16,
-    fontWeight: '600',
-    color: '#1c1c1e',
-  },
-  selectedVoiceType: {
-    fontSize: 12,
-    color: '#636366',
-    marginTop: 2,
-  },
-  subtitle: {
-    fontSize: 16,
-    color: '#636366',
-    marginTop: 5,
-  },
   section: {
     marginBottom: 20,
     backgroundColor: '#ffffff',
@@ -748,162 +596,6 @@ const styles = StyleSheet.create({
     marginBottom: 10,
     color: '#1c1c1e',
   },
-  textInput: {
-    borderWidth: 1,
-    borderColor: '#e5e5ea',
-    borderRadius: 8,
-    padding: 12,
-    minHeight: 100,
-    textAlignVertical: 'top',
-    fontSize: 16,
-    color: '#1c1c1e',
-  },
-  modelVoiceRow: {
-    flexDirection: 'row',
-  },
-  modelVoiceColumn: {
-    flex: 1,
-    marginRight: 10,
-  },
-  modelVoiceLabel: {
-    fontSize: 14,
-    fontWeight: '600',
-    color: '#636366',
-    marginBottom: 8,
-  },
-  modelSelectorCard: {
-    backgroundColor: '#f2f2f7',
-    borderRadius: 8,
-    padding: 12,
-    borderWidth: 1,
-    borderColor: '#e5e5ea',
-  },
-  modelSelectorContent: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-  },
-  modelSelectorTextContainer: {
-    flex: 1,
-    marginRight: 8,
-  },
-  modelSelectorText: {
-    fontSize: 16,
-    fontWeight: '600',
-    color: '#1c1c1e',
-  },
-  modelSelectorSubtext: {
-    fontSize: 12,
-    color: '#636366',
-    marginTop: 2,
-  },
-  chevron: {
-    fontSize: 20,
-    color: '#8e8e93',
-  },
-  compactLoadingContainer: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginTop: 6,
-  },
-  compactLoadingText: {
-    fontSize: 12,
-    color: '#636366',
-    marginLeft: 6,
-  },
-  compactWarningText: {
-    fontSize: 12,
-    color: '#ff6b6b',
-    marginTop: 6,
-  },
-  speedSectionHeader: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-  },
-  compactSpeedControls: {
-    flexDirection: 'row',
-    alignItems: 'center',
-  },
-  compactSpeedButton: {
-    backgroundColor: '#007AFF',
-    width: 32,
-    height: 32,
-    borderRadius: 16,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  compactSpeedButtonText: {
-    color: '#ffffff',
-    fontSize: 18,
-    fontWeight: 'bold',
-  },
-  compactSpeedValue: {
-    fontSize: 16,
-    fontWeight: '600',
-    color: '#1c1c1e',
-    minWidth: 50,
-    textAlign: 'center',
-    marginHorizontal: 12,
-  },
-  buttonText: {
-    color: '#ffffff',
-    fontWeight: '600',
-    fontSize: 14,
-  },
-  voiceSelector: {
-    marginBottom: 10,
-  },
-  voiceItem: {
-    padding: 10,
-    backgroundColor: '#f2f2f7',
-    borderRadius: 8,
-    marginRight: 10,
-    minWidth: 80,
-    alignItems: 'center',
-  },
-  selectedVoiceItem: {
-    backgroundColor: '#d1e7ff',
-    borderColor: '#007AFF',
-    borderWidth: 1,
-  },
-  undownloadedVoiceItem: {
-    opacity: 0.7,
-  },
-  voiceName: {
-    fontWeight: '600',
-    fontSize: 14,
-    color: '#1c1c1e',
-  },
-  voiceGender: {
-    fontSize: 12,
-    color: '#636366',
-    marginTop: 2,
-  },
-  downloadIndicator: {
-    fontSize: 16,
-    color: '#007AFF',
-    marginTop: 2,
-  },
-  streamingInfo: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    marginBottom: 10,
-  },
-  streamingMetric: {
-    fontSize: 14,
-    color: '#636366',
-  },
-  streamProgressBar: {
-    height: 4,
-    backgroundColor: '#e5e5ea',
-    borderRadius: 2,
-    overflow: 'hidden',
-  },
-  streamProgress: {
-    height: '100%',
-    backgroundColor: '#34C759',
-  },
   errorContainer: {
     backgroundColor: '#ffdddd',
     padding: 10,
@@ -915,100 +607,6 @@ const styles = StyleSheet.create({
   errorText: {
     color: '#d63031',
     fontSize: 14,
-  },
-  loadingContainer: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    marginTop: 10,
-    padding: 10,
-  },
-  loadingText: {
-    marginLeft: 10,
-    color: '#636366',
-    fontSize: 14,
-  },
-  buttonContainer: {
-    marginBottom: 20,
-  },
-  generateButtonContainer: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-  },
-  button: {
-    flex: 1,
-    backgroundColor: '#007AFF',
-    paddingVertical: 15,
-    borderRadius: 10,
-    alignItems: 'center',
-  },
-  generateButton: {
-    backgroundColor: '#FF2D55',
-  },
-  playbackControls: {
-    flexDirection: 'row',
-    marginLeft: 10,
-  },
-  iconButton: {
-    width: 50,
-    height: 50,
-    borderRadius: 25,
-    backgroundColor: '#f2f2f7',
-    alignItems: 'center',
-    justifyContent: 'center',
-    marginLeft: 5,
-  },
-  iconButtonText: {
-    fontSize: 24,
-  },
-  streamingMetricsContainer: {
-    marginBottom: 10,
-  },
-  streamingMetricRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    paddingVertical: 4,
-    borderBottomWidth: 1,
-    borderBottomColor: '#f0f0f0',
-  },
-  streamingMetricLabel: {
-    fontSize: 14,
-    color: '#636366',
-    fontWeight: '500',
-  },
-  streamingMetricValue: {
-    fontSize: 14,
-    color: '#1c1c1e',
-    fontWeight: '600',
-  },
-  phonemesContainer: {
-    marginTop: 10,
-    padding: 10,
-    backgroundColor: '#f2f2f7',
-    borderRadius: 8,
-  },
-  phonemesLabel: {
-    fontSize: 14,
-    fontWeight: '600',
-    color: '#636366',
-    marginBottom: 5,
-  },
-  phonemesText: {
-    fontSize: 14,
-    color: '#1c1c1e',
-    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
-  },
-  responseContainer: {
-    backgroundColor: '#f2f2f7',
-    borderRadius: 8,
-    padding: 12,
-    marginTop: 8,
-  },
-  responseText: {
-    fontSize: 16,
-    color: '#1c1c1e',
-    lineHeight: 24,
   },
   conversationHeader: {
     flexDirection: 'row',
@@ -1046,74 +644,6 @@ const styles = StyleSheet.create({
     color: '#1c1c1e',
     lineHeight: 20,
   },
-  modeToggleContainer: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginBottom: 15,
-  },
-  modeLabel: {
-    fontSize: 16,
-    fontWeight: '600',
-    color: '#1c1c1e',
-    marginRight: 10,
-  },
-  modeButton: {
-    paddingHorizontal: 16,
-    paddingVertical: 8,
-    borderRadius: 8,
-    backgroundColor: '#f2f2f7',
-    borderWidth: 1,
-    borderColor: '#e5e5ea',
-    marginLeft: 10,
-  },
-  modeButtonActive: {
-    backgroundColor: '#007AFF',
-    borderColor: '#007AFF',
-  },
-  modeButtonText: {
-    fontSize: 14,
-    fontWeight: '600',
-    color: '#636366',
-  },
-  modeButtonTextActive: {
-    color: '#ffffff',
-  },
-  llmStatusContainer: {
-    marginBottom: 15,
-    padding: 12,
-    backgroundColor: '#f2f2f7',
-    borderRadius: 8,
-  },
-  llmStatusRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-  },
-  llmStatusText: {
-    fontSize: 14,
-    color: '#636366',
-    marginLeft: 8,
-  },
-  llmStatusTextReady: {
-    fontSize: 14,
-    color: '#34C759',
-    fontWeight: '600',
-  },
-  llmStatusTextError: {
-    fontSize: 14,
-    color: '#ff6b6b',
-  },
-  retryButton: {
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-    backgroundColor: '#007AFF',
-    borderRadius: 6,
-    marginLeft: 8,
-  },
-  retryButtonText: {
-    color: '#ffffff',
-    fontSize: 12,
-    fontWeight: '600',
-  },
   generatingContainer: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -1124,13 +654,6 @@ const styles = StyleSheet.create({
     fontSize: 14,
     color: '#636366',
     marginLeft: 8,
-  },
-  clearButton: {
-    marginTop: 12,
-    padding: 10,
-    backgroundColor: '#f2f2f7',
-    borderRadius: 8,
-    alignItems: 'center',
   },
   clearButtonInline: {
     paddingHorizontal: 12,

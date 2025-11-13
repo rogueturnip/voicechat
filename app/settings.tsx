@@ -8,6 +8,7 @@ import KokoroOnnx from '../kokoro/kokoroOnnx';
 import { MODELS, getDownloadedModels, downloadModel, isModelDownloaded } from '../kokoro/models';
 import { useTTSStore } from '../store/ttsStore';
 import llmService from '../kokoro/llmService';
+import conversationDb from '../store/conversationDb';
 
 export default function Settings() {
   const router = useRouter();
@@ -361,6 +362,44 @@ export default function Settings() {
             </View>
           )}
         </View>
+
+        {/* Clear Conversations */}
+        {isLLMMode && (
+          <View style={styles.section}>
+            <Text style={styles.sectionTitle}>Conversation History</Text>
+            <TouchableOpacity
+              style={styles.clearButton}
+              onPress={async () => {
+                Alert.alert(
+                  'Clear Conversations',
+                  'Are you sure you want to clear all conversation history? This cannot be undone.',
+                  [
+                    {
+                      text: 'Cancel',
+                      style: 'cancel',
+                    },
+                    {
+                      text: 'Clear',
+                      style: 'destructive',
+                      onPress: async () => {
+                        try {
+                          await conversationDb.initialize();
+                          await conversationDb.clearAllMessages();
+                          Alert.alert('Success', 'Conversation history cleared');
+                        } catch (error) {
+                          console.error('[Settings] Error clearing conversations:', error);
+                          Alert.alert('Error', 'Failed to clear conversation history');
+                        }
+                      },
+                    },
+                  ]
+                );
+              }}
+            >
+              <Text style={styles.clearButtonText}>Clear All Conversations</Text>
+            </TouchableOpacity>
+          </View>
+        )}
       </ScrollView>
     </SafeAreaView>
   );
@@ -585,6 +624,18 @@ const styles = StyleSheet.create({
   errorText: {
     color: '#d63031',
     fontSize: 14,
+  },
+  clearButton: {
+    marginTop: 10,
+    padding: 12,
+    backgroundColor: '#ff3b30',
+    borderRadius: 8,
+    alignItems: 'center',
+  },
+  clearButtonText: {
+    fontSize: 16,
+    color: '#ffffff',
+    fontWeight: '600',
   },
 });
 

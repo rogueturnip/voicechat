@@ -1,10 +1,9 @@
 import { File, Directory, Paths } from 'expo-file-system';
 import { InferenceSession, Tensor } from 'onnxruntime-react-native';
 import { createAudioPlayer, AudioPlayer } from 'expo-audio';
-import { VOICES, getVoiceData } from './voices';
+import { getVoiceData } from './voices';
 import { Platform } from 'react-native';
-import { MODELS } from './models';
-import { loadCMUDictionary, lookupWord } from './cmuDictionary';
+import { tokenize as phonemizeTokenize } from './phonemics';
 
 // Constants
 const SAMPLE_RATE = 24000;
@@ -14,81 +13,19 @@ const MAX_PHONEME_LENGTH = 510;
 // Voice data URL
 const VOICE_DATA_URL = "https://huggingface.co/onnx-community/Kokoro-82M-v1.0-ONNX/resolve/main/voices";
 
-// Complete vocabulary from Python code
-const VOCAB = (() => {
-  const _pad = "$";
-  const _punctuation = ';:,.!?¡¿—…"«»"" ';
-  const _letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
-  const _letters_ipa = "ɑɐɒæɓʙβɔɕçɗɖðʤəɘɚɛɜɝɞɟʄɡɠɢʛɦɧħɥʜɨɪʝɭɬɫɮʟɱɯɰŋɳɲɴøɵɸθœɶʘɹɺɾɻʀʁɽʂʃʈʧʉʊʋⱱʌɣɤʍχʎʏʑʐʒʔʡʕʢǀǁǂǃˈˌːˑʼʴʰʱʲʷˠˤ˞↓↑→↗↘'̩'ᵻ";
-  
-  const symbols = [_pad, ..._punctuation.split(''), ..._letters.split(''), ..._letters_ipa.split('')];
-  const dicts: Record<string, number> = {};
-  
-  for (let i = 0; i < symbols.length; i++) {
-    dicts[symbols[i]] = i;
-  }
-  
-  return dicts;
-})();
-
-// Common English phoneme mappings for basic phonemization
-const ENGLISH_PHONEME_MAP = {
-  'a': 'ə',
-  'e': 'ɛ',
-  'i': 'ɪ',
-  'o': 'oʊ',
-  'u': 'ʌ',
-  'th': 'θ',
-  'sh': 'ʃ',
-  'ch': 'tʃ',
-  'ng': 'ŋ',
-  'j': 'dʒ',
-  'r': 'ɹ',
-  'er': 'ɝ',
-  'ar': 'ɑɹ',
-  'or': 'ɔɹ',
-  'ir': 'ɪɹ',
-  'ur': 'ʊɹ',
-};
-
-// Common word to phoneme mappings
-const COMMON_WORD_PHONEMES = {
-  'hello': 'hɛˈloʊ',
-  'world': 'wˈɝld',
-  'this': 'ðˈɪs',
-  'is': 'ˈɪz',
-  'a': 'ə',
-  'test': 'tˈɛst',
-  'of': 'ʌv',
-  'the': 'ðə',
-  'kokoro': 'kˈoʊkəɹoʊ',
-  'text': 'tˈɛkst',
-  'to': 'tˈuː',
-  'speech': 'spˈiːtʃ',
-  'system': 'sˈɪstəm',
-  'running': 'ɹˈʌnɪŋ',
-  'on': 'ˈɑːn',
-  'expo': 'ˈɛkspoʊ',
-  'with': 'wˈɪð',
-  'onnx': 'ˈɑːnɛks',
-  'runtime': 'ɹˈʌntaɪm',
-};
-
 class KokoroOnnx {
   private session: InferenceSession | null = null;
   private isModelLoaded: boolean = false;
-  private voiceCache: Map<string, Float32Array> = new Map();
   private isOnnxAvailable: boolean = true;
   private currentModelId: string | null = null;
   private isStreaming: boolean = false;
   private streamingSound: AudioPlayer | null = null;
-  private streamingStartTime: number | null = null;
-  private tokensProcessed: number = 0;
   private tokensPerSecond: number = 0;
   private timeToFirstToken: number = 0;
-  private streamingTokens: number[] = [];
   private streamingPhonemes: string = "";
-  private streamingCallback: ((status: any) => void) | null = null;
+  private audioQueue: Array<{ uri: string; duration: number }> = [];
+  private isPlayingQueue: boolean = false;
+  private currentQueuePlayer: AudioPlayer | null = null;
 
   constructor() {
     // Properties initialized above
@@ -237,14 +174,209 @@ class KokoroOnnx {
       }
       this.streamingSound = null;
     }
+    if (this.currentQueuePlayer) {
+      try {
+        (this.currentQueuePlayer as any).stop?.();
+        this.currentQueuePlayer.release();
+      } catch (error) {
+        console.error('Error stopping queue player:', error);
+      }
+      this.currentQueuePlayer = null;
+    }
+    this.audioQueue = [];
+    this.isPlayingQueue = false;
     this.isStreaming = false;
-    this.streamingStartTime = null;
-    this.tokensProcessed = 0;
     this.tokensPerSecond = 0;
     this.timeToFirstToken = 0;
-    this.streamingTokens = [];
     this.streamingPhonemes = "";
-    this.streamingCallback = null;
+  }
+
+  /**
+   * Split text into chunks for streaming
+   * Tries to split at sentence boundaries, falls back to word boundaries, then character boundaries
+   * @param {string} text The text to chunk
+   * @param {number} maxChunkLength Maximum characters per chunk
+   * @returns {string[]} Array of text chunks
+   */
+  private _chunkText(text: string, maxChunkLength: number = 200): string[] {
+    if (text.length <= maxChunkLength) {
+      return [text];
+    }
+
+    const chunks: string[] = [];
+    let currentIndex = 0;
+
+    while (currentIndex < text.length) {
+      const remaining = text.length - currentIndex;
+      
+      if (remaining <= maxChunkLength) {
+        // Last chunk - take everything remaining
+        chunks.push(text.slice(currentIndex).trim());
+        break;
+      }
+
+      // Try to find a sentence boundary (., !, ?, followed by space)
+      const sentenceEnd = text.slice(currentIndex, currentIndex + maxChunkLength).search(/[.!?]\s/);
+      if (sentenceEnd > 50) { // Only use if it's not too close to the start
+        const chunkEnd = currentIndex + sentenceEnd + 1;
+        chunks.push(text.slice(currentIndex, chunkEnd).trim());
+        currentIndex = chunkEnd + 1;
+        continue;
+      }
+
+      // Try to find a word boundary (space or punctuation)
+      const wordBoundary = text.slice(currentIndex, currentIndex + maxChunkLength).lastIndexOf(' ');
+      if (wordBoundary > 30) { // Only use if it's not too close to the start
+        const chunkEnd = currentIndex + wordBoundary;
+        chunks.push(text.slice(currentIndex, chunkEnd).trim());
+        currentIndex = chunkEnd + 1;
+        continue;
+      }
+
+      // Fall back to character boundary
+      chunks.push(text.slice(currentIndex, currentIndex + maxChunkLength).trim());
+      currentIndex += maxChunkLength;
+    }
+
+    return chunks.filter(chunk => chunk.length > 0);
+  }
+
+  /**
+   * Play the next item in the audio queue
+   * @returns {Promise<void>}
+   */
+  private async _playNextInQueue(): Promise<void> {
+    if (this.audioQueue.length === 0) {
+      console.log(`[PlayQueue] Queue empty, stopping playback`);
+      this.isPlayingQueue = false;
+      this.currentQueuePlayer = null;
+      return;
+    }
+
+    if (this.isPlayingQueue && this.currentQueuePlayer) {
+      // Already playing, wait for current to finish
+      console.log(`[PlayQueue] Already playing, waiting...`);
+      return;
+    }
+
+    const nextItem = this.audioQueue.shift();
+    if (!nextItem) {
+      console.log(`[PlayQueue] No item available, stopping playback`);
+      this.isPlayingQueue = false;
+      this.currentQueuePlayer = null;
+      return;
+    }
+
+    this.isPlayingQueue = true;
+    const queueSize = this.audioQueue.length;
+    console.log(`[PlayQueue] ▶ Playing chunk (${nextItem.duration.toFixed(0)}ms), ${queueSize} remaining in queue`);
+    
+    try {
+      const sound = createAudioPlayer({ uri: nextItem.uri });
+      this.currentQueuePlayer = sound;
+      sound.play();
+
+      // Wait for the audio to finish playing (duration in milliseconds)
+      // Add small buffer (50ms) to account for timing inaccuracies
+      await new Promise<void>((resolve) => {
+        const timeout = setTimeout(() => {
+          resolve();
+        }, nextItem.duration + 50);
+
+        // Try to use AudioPlayer events if available
+        try {
+          if ((sound as any).addListener) {
+            (sound as any).addListener('playbackStatusUpdate', (status: any) => {
+              if (status?.didJustFinish || status?.isPlaying === false) {
+                clearTimeout(timeout);
+                resolve();
+              }
+            });
+          }
+        } catch (e) {
+          // Event listener not available, use timeout
+        }
+      });
+
+      // Clean up
+      try {
+        (sound as any).stop?.();
+        sound.release();
+      } catch (e) {
+        // Ignore cleanup errors
+      }
+
+      this.currentQueuePlayer = null;
+      console.log(`[PlayQueue] ✓ Chunk finished, moving to next...`);
+
+      // Play next item in queue
+      await this._playNextInQueue();
+    } catch (error) {
+      console.error('Error playing queue item:', error);
+      this.isPlayingQueue = false;
+      this.currentQueuePlayer = null;
+      // Continue with next item even on error
+      await this._playNextInQueue();
+    }
+  }
+
+  /**
+   * Generate audio for a single chunk of text
+   * @param {string} chunkText The text chunk
+   * @param {string} voiceId The voice ID
+   * @param {number} speed The speaking speed
+   * @param {number[]} preTokenized Optional pre-tokenized tokens to avoid double tokenization
+   * @returns {Promise<{ uri: string; duration: number }>} Audio file URI and duration
+   */
+  private async _generateChunkAudio(
+    chunkText: string,
+    voiceId: string,
+    speed: number,
+    preTokenized?: number[]
+  ): Promise<{ uri: string; duration: number }> {
+    // Tokenize (or use pre-tokenized if provided)
+    const tokens = preTokenized || await this.tokenize(chunkText);
+    const numTokens = Math.min(Math.max(tokens.length - 2, 0), MAX_PHONEME_LENGTH - 1);
+    
+    // Get voice style data
+    const voiceData = await getVoiceData(voiceId);
+    const offset = numTokens * STYLE_DIM;
+    const styleData = voiceData.slice(offset, offset + STYLE_DIM);
+    
+    // Prepare input tensors
+    const inputs: Record<string, Tensor> = {};
+    try {
+      inputs['input_ids'] = new Tensor('int64', new Int32Array(tokens), [1, tokens.length]);
+    } catch (error) {
+      inputs['input_ids'] = new Tensor('int64', tokens, [1, tokens.length]);
+    }
+    
+    inputs['style'] = new Tensor('float32', new Float32Array(styleData), [1, STYLE_DIM]);
+    inputs['speed'] = new Tensor('float32', new Float32Array([speed]), [1]);
+    
+    // Run inference
+    if (!this.session) {
+      throw new Error('Session is not initialized');
+    }
+    const outputs = await this.session.run(inputs);
+    
+    if (!outputs || !outputs['waveform'] || !outputs['waveform'].data) {
+      throw new Error('Invalid output from model inference');
+    }
+    
+    // Process waveform
+    const waveformData = outputs['waveform'].data;
+    const waveform = waveformData instanceof Float32Array 
+      ? waveformData 
+      : new Float32Array(waveformData as ArrayLike<number>);
+    
+    // Convert to audio file
+    const audioUri = await this._floatArrayToAudioFile(waveform);
+    
+    // Calculate duration (samples / sample rate, adjusted for speed)
+    const duration = (waveform.length / SAMPLE_RATE / speed) * 1000; // in milliseconds
+    
+    return { uri: audioUri, duration };
   }
 
   /**
@@ -298,136 +430,14 @@ class KokoroOnnx {
   }
 
   /**
-   * Normalize text for phonemization
+   * Tokenize text (delegates to phonemics utility)
    * @param {string} text The input text
-   * @returns {string} Normalized text
-   */
-  normalizeText(text: string): string {
-    // Remove leading/trailing whitespace
-    text = text.trim();
-    
-    // Replace multiple spaces with a single space
-    text = text.replace(/\s+/g, ' ');
-    
-    // Replace curly quotes with straight quotes
-    text = text.replace(/[\u2018\u2019]/g, "'").replace(/[\u201C\u201D]/g, '"');
-    
-    // Replace other special characters
-    text = text.replace(/…/g, '...');
-    
-    return text;
-  }
-
-  /**
-   * Basic phonemization function with CMU dictionary support
-   * @param {string} text The input text
-   * @returns {Promise<string>} Phonemized text
-   */
-  async phonemize(text: string): Promise<string> {
-    // Normalize the text first
-    text = this.normalizeText(text);
-    
-    // Ensure CMU dictionary is loaded
-    await loadCMUDictionary();
-    
-    // Split text into words
-    const words = text.split(/\s+/);
-    
-    // Phonemize each word
-    const phonemizedWords = await Promise.all(words.map(async (word: string) => {
-      // First, try CMU dictionary lookup
-      const cleanWord = word.toLowerCase().replace(/[.,!?;:'"]/g, '');
-      const cmuPhoneme = await lookupWord(cleanWord);
-      
-      if (cmuPhoneme) {
-        return cmuPhoneme;
-      }
-      
-      // Fallback to pre-defined phonemes
-      if (cleanWord in COMMON_WORD_PHONEMES) {
-        return COMMON_WORD_PHONEMES[cleanWord as keyof typeof COMMON_WORD_PHONEMES];
-      }
-      
-      // Otherwise, do a simple character-by-character phonemization
-      let phonemes = '';
-      let i = 0;
-      
-      while (i < word.length) {
-        // Check for digraphs (two-letter phonemes)
-        if (i < word.length - 1) {
-          const digraph = word.substring(i, i + 2).toLowerCase();
-          if (digraph in ENGLISH_PHONEME_MAP) {
-            phonemes += ENGLISH_PHONEME_MAP[digraph as keyof typeof ENGLISH_PHONEME_MAP];
-            i += 2;
-            continue;
-          }
-        }
-        
-        // Check for single character phonemes
-        const char = word[i].toLowerCase();
-        if (char in ENGLISH_PHONEME_MAP) {
-          phonemes += ENGLISH_PHONEME_MAP[char as keyof typeof ENGLISH_PHONEME_MAP];
-        } else if (/[a-z]/.test(char)) {
-          // For other alphabetic characters, just use the character itself
-          phonemes += char;
-        } else if (/[.,!?;:'"]/g.test(char)) {
-          // For punctuation, keep it as is
-          phonemes += char;
-        }
-        
-        i++;
-      }
-      
-      // Add stress marker to the first syllable if the word is long enough
-      if (phonemes.length > 2 && !/[.,!?;:'"]/g.test(phonemes)) {
-        // Find the first vowel
-        const firstVowelMatch = phonemes.match(/[ɑɐɒæəɘɚɛɜɝɞɨɪʊʌɔoeiuaɑː]/);
-        if (firstVowelMatch && firstVowelMatch.index !== undefined) {
-          const vowelIndex = firstVowelMatch.index;
-          phonemes = phonemes.substring(0, vowelIndex) + 'ˈ' + phonemes.substring(vowelIndex);
-        }
-      }
-      
-      return phonemes;
-    }));
-    
-    // Join the phonemized words with spaces
-    return phonemizedWords.join(' ');
-  }
-
-  /**
-   * Tokenize phonemized text
-   * @param {string} phonemes The phonemized text
    * @returns {Promise<number[]>} Tokenized input
    */
-  async tokenize(phonemes: string): Promise<number[]> {
-    // If input is regular text, phonemize it first
-    if (!/[ɑɐɒæəɘɚɛɜɝɞɨɪʊʌɔˈˌː]/.test(phonemes)) {
-      phonemes = await this.phonemize(phonemes);
-    }
-    
-    console.log('Phonemized text:', phonemes);
-    this.streamingPhonemes = phonemes;
-    
-    const tokens = [];
-    
-    // Add start token (0)
-    tokens.push(0);
-    
-    // Convert each character to a token if it exists in VOCAB
-    for (const char of phonemes) {
-      const tokenId = VOCAB[char];
-      if (tokenId !== undefined) {
-        tokens.push(tokenId);
-      } else {
-        console.warn(`Character not in vocabulary: "${char}" (code: ${char.charCodeAt(0)})`);
-      }
-    }
-    
-    // Add end token (0)
-    tokens.push(0);
-    
-    return tokens;
+  async tokenize(text: string): Promise<number[]> {
+    const result = await phonemizeTokenize(text, { value: this.streamingPhonemes });
+    this.streamingPhonemes = result.phonemes;
+    return result.tokens;
   }
 
   /**
@@ -513,6 +523,7 @@ class KokoroOnnx {
 
   /**
    * Generate and stream audio in real-time
+   * Now uses true streaming: generates and plays audio chunks as they're created
    * @param {string} text The input text
    * @param {string} voiceId The voice ID to use
    * @param {number} speed The speaking speed (0.5-2.0)
@@ -539,88 +550,124 @@ class KokoroOnnx {
 
     try {
       this.isStreaming = true;
-      this.streamingStartTime = Date.now();
-      this.tokensProcessed = 0;
       this.timeToFirstToken = 0;
-      this.streamingTokens = [];
       this.streamingPhonemes = "";
-      this.streamingCallback = onProgress;
+      this.audioQueue = [];
+      this.isPlayingQueue = false;
       
       // Ensure voice is downloaded
       await this.downloadVoice(voiceId);
       
-      // 1. Tokenize the input text
-      const tokens = await this.tokenize(text);
-      this.streamingTokens = tokens;
-      const numTokens = Math.min(Math.max(tokens.length - 2, 0), MAX_PHONEME_LENGTH - 1);
-      this.tokensProcessed = numTokens;
-      
-      // 2. Get voice style data
-      const voiceData = await getVoiceData(voiceId);
-      const offset = numTokens * STYLE_DIM;
-      const styleData = voiceData.slice(offset, offset + STYLE_DIM);
-      
-      // 3. Prepare input tensors
-      const inputs: Record<string, Tensor> = {};
-      
-      try {
-        inputs['input_ids'] = new Tensor('int64', new Int32Array(tokens), [1, tokens.length]);
-      } catch (error) {
-        inputs['input_ids'] = new Tensor('int64', tokens, [1, tokens.length]);
+      // Split text into chunks for streaming (use much smaller chunks for faster time-to-first-audio)
+      // Smaller chunks = faster generation = audio starts sooner
+      const textChunks = this._chunkText(text, 75);
+      console.log(`[StreamAudio] Text length: ${text.length}, Split into ${textChunks.length} chunks`);
+      if (textChunks.length > 1) {
+        console.log(`[StreamAudio] Chunk sizes:`, textChunks.map(c => c.length));
       }
       
-      inputs['style'] = new Tensor('float32', new Float32Array(styleData), [1, STYLE_DIM]);
-      inputs['speed'] = new Tensor('float32', new Float32Array([speed]), [1]);
-      
-      // Start timing for tokens per second calculation and time to first token
-      const inferenceStartTime = Date.now();
-      
-      // 4. Run inference
-      if (!this.session) {
-        throw new Error('Session is not initialized');
-      }
-      const outputs = await this.session.run(inputs);
-      
-      // Calculate time to first token
-      this.timeToFirstToken = Date.now() - inferenceStartTime;
-      
-      // Calculate tokens per second
-      const inferenceEndTime = Date.now();
-      const inferenceTimeSeconds = (inferenceEndTime - inferenceStartTime) / 1000;
-      this.tokensPerSecond = inferenceTimeSeconds > 0 ? numTokens / inferenceTimeSeconds : 0;
-      
-      if (!outputs || !outputs['waveform'] || !outputs['waveform'].data) {
-        throw new Error('Invalid output from model inference');
+      if (textChunks.length === 0) {
+        throw new Error('No text chunks to process');
       }
       
-      // 5. Process the output waveform
-      const waveformData = outputs['waveform'].data;
-      // Ensure waveform is Float32Array
-      const waveform = waveformData instanceof Float32Array 
-        ? waveformData 
-        : new Float32Array(waveformData as ArrayLike<number>);
+      // If only one chunk, still use streaming mode (it's the same code path)
+      // This ensures consistent behavior
       
-      // 6. Convert to audio buffer and start streaming
-      const audioUri = await this._floatArrayToAudioFile(waveform);
+      // Start timing for time to first token
+      const overallStartTime = Date.now();
+      let totalTokens = 0;
       
-      // 7. Create and play the sound
-      const sound = createAudioPlayer({ uri: audioUri });
+      // Generate first chunk and start playing immediately
+      const firstChunk = textChunks[0];
+      console.log(`[StreamAudio] Generating first chunk (${firstChunk.length} chars): "${firstChunk.substring(0, 50)}..."`);
+      const firstChunkTokens = await this.tokenize(firstChunk);
+      const firstNumTokens = Math.min(Math.max(firstChunkTokens.length - 2, 0), MAX_PHONEME_LENGTH - 1);
+      totalTokens += firstNumTokens;
       
-      // Start playback
-      sound.play();
-      this.streamingSound = sound;
+      const firstChunkAudio = await this._generateChunkAudio(firstChunk, voiceId, speed, firstChunkTokens);
+      this.timeToFirstToken = Date.now() - overallStartTime;
+      console.log(`[StreamAudio] ✓ First chunk generated in ${this.timeToFirstToken}ms, duration: ${firstChunkAudio.duration.toFixed(0)}ms, starting playback...`);
       
-      // Note: Progress callbacks would need to be implemented using AudioPlayer events
-      // For now, basic playback is supported
+      // Add first chunk to queue and start playing
+      this.audioQueue.push(firstChunkAudio);
+      this._playNextInQueue().catch((err) => {
+        console.error('[StreamAudio] Error in playback queue:', err);
+      });
       
-      // Return the tokens per second for immediate feedback
+      if (onProgress) {
+        onProgress({
+          chunkIndex: 1,
+          totalChunks: textChunks.length,
+          progress: (1 / textChunks.length) * 100,
+          chunkText: firstChunk
+        });
+      }
+      
+      // Start generating remaining chunks IMMEDIATELY in parallel (don't wait)
+      // This ensures chunks are ready before they're needed in the queue
+      const remainingPromises: Promise<void>[] = [];
+      
+      for (let i = 1; i < textChunks.length; i++) {
+        const chunk = textChunks[i];
+        const chunkIndex = i;
+        
+        const generatePromise = (async () => {
+          try {
+            console.log(`[StreamAudio] Generating chunk ${chunkIndex + 1}/${textChunks.length} (${chunk.length} chars)...`);
+            const chunkStartTime = Date.now();
+            
+            // Tokenize first to get token count
+            const chunkTokens = await this.tokenize(chunk);
+            const numTokens = Math.min(Math.max(chunkTokens.length - 2, 0), MAX_PHONEME_LENGTH - 1);
+            totalTokens += numTokens;
+            
+            // Generate audio using pre-tokenized tokens
+            const chunkAudio = await this._generateChunkAudio(chunk, voiceId, speed, chunkTokens);
+            
+            // Add to queue (playback will continue automatically)
+            this.audioQueue.push(chunkAudio);
+            const genTime = Date.now() - chunkStartTime;
+            console.log(`[StreamAudio] ✓ Chunk ${chunkIndex + 1}/${textChunks.length} generated in ${genTime}ms, duration: ${chunkAudio.duration.toFixed(0)}ms, queued for playback`);
+            
+            // Call progress callback if provided
+            if (onProgress) {
+              onProgress({
+                chunkIndex: chunkIndex + 1,
+                totalChunks: textChunks.length,
+                progress: ((chunkIndex + 1) / textChunks.length) * 100,
+                chunkText: chunk
+              });
+            }
+          } catch (error) {
+            console.error(`[StreamAudio] Error generating chunk ${chunkIndex + 1}:`, error);
+            // Continue with other chunks even if one fails
+          }
+        })();
+        
+        remainingPromises.push(generatePromise);
+      }
+      
+      // Don't wait for remaining chunks - let them generate in background
+      // The queue will play them as they become available
+      Promise.all(remainingPromises).then(() => {
+        // Calculate overall tokens per second
+        const totalTime = (Date.now() - overallStartTime) / 1000;
+        this.tokensPerSecond = totalTime > 0 ? totalTokens / totalTime : 0;
+        console.log(`[StreamAudio] ✓ All chunks generated. Total tokens: ${totalTokens}, Tokens/sec: ${this.tokensPerSecond.toFixed(2)}`);
+      }).catch((err) => {
+        console.error('[StreamAudio] Error in background chunk generation:', err);
+      });
+      
+      // Return immediately with first chunk metrics (don't wait for all chunks)
       return {
-        tokensPerSecond: this.tokensPerSecond,
+        tokensPerSecond: 0, // Will be updated in background
         timeToFirstToken: this.timeToFirstToken,
-        totalTokens: numTokens
+        totalTokens: firstNumTokens // Approximate, will be updated in background
       };
     } catch (error) {
       this.isStreaming = false;
+      this.audioQueue = [];
+      this.isPlayingQueue = false;
       console.error('Error streaming audio:', error);
       throw error;
     }
@@ -646,20 +693,6 @@ class KokoroOnnx {
       console.error('Error converting float array to audio file:', error);
       throw error;
     }
-  }
-
-  /**
-   * Convert ArrayBuffer to base64 string
-   * @param {ArrayBuffer} buffer The buffer to convert
-   * @returns {string} Base64 string
-   */
-  _arrayBufferToBase64(buffer: ArrayBuffer): string {
-    const bytes = new Uint8Array(buffer);
-    let binary = '';
-    for (let i = 0; i < bytes.byteLength; i++) {
-      binary += String.fromCharCode(bytes[i]);
-    }
-    return btoa(binary);
   }
 
   /**
