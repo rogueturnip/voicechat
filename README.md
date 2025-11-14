@@ -1,18 +1,8 @@
-# Kokoro TTS Expo App
+# TTS Demo
 
 ## On-Device Text-to-Speech with ONNX Runtime
 
-Kokoro TTS Demo is a mobile application that demonstrates high-quality text-to-speech capabilities running entirely on-device using ONNX Runtime. This app showcases how modern neural TTS models can be deployed on mobile devices without requiring cloud connectivity.
-
-### Demo Video
-
-<p align="center">
-  <a href="https://youtube.com/shorts/IvZ5ahpOsZE" target="_blank">
-    <img src="https://img.youtube.com/vi/IvZ5ahpOsZE/0.jpg" alt="Kokoro TTS Demo Video" width="320">
-  </a>
-</p>
-
-*Click the image above to watch the demo video on YouTube*
+TTS Demo is a mobile application that demonstrates high-quality text-to-speech capabilities running entirely on-device using ONNX Runtime. This app showcases how modern neural TTS models can be deployed on mobile devices without requiring cloud connectivity.
 
 ## Features
 
@@ -29,7 +19,7 @@ Kokoro TTS Demo is a mobile application that demonstrates high-quality text-to-s
 
 ## How It Works
 
-Kokoro TTS uses a neural text-to-speech model converted to ONNX format, which allows it to run efficiently on mobile devices using ONNX Runtime. The app follows these steps to generate speech:
+The app uses a neural text-to-speech model (Kokoro) converted to ONNX format, which allows it to run efficiently on mobile devices using ONNX Runtime. The app follows these steps to generate speech:
 
 1. **Text Normalization**: Prepares the input text for processing
 2. **Phonemization**: Converts text to phonetic representation
@@ -64,18 +54,12 @@ Kokoro TTS uses a neural text-to-speech model converted to ONNX format, which al
 
 ### Installation
 
-1. Clone the repository:
-   ```bash
-   git clone https://github.com/isaiahbjork/expo-kokoro-onnx.git
-   cd expo-kokoro-onnx
-   ```
-
-2. Install dependencies:
+1. Install dependencies:
    ```bash
    npm install
    ```
 
-3. Start the Expo development server:
+2. Start the Expo development server:
    ```bash
    npx expo start
    ```
