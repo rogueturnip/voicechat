@@ -26,11 +26,54 @@ function RNSpeechVoiceSelector({ selectedVoice, onVoiceSelected }: RNSpeechVoice
       setIsLoading(true);
       console.log('[RNSpeechVoiceSelector] Loading voices...');
       const availableVoices = await Speech.getAvailableVoices();
-      console.log('[RNSpeechVoiceSelector] Loaded voices:', availableVoices.length, availableVoices);
-      setVoices(availableVoices);
-      // Auto-select first voice if none selected
-      if (!selectedVoice && availableVoices.length > 0) {
-        onVoiceSelected(availableVoices[0].identifier);
+      console.log('[RNSpeechVoiceSelector] Raw voices response:', JSON.stringify(availableVoices, null, 2));
+      console.log('[RNSpeechVoiceSelector] Loaded voices count:', availableVoices?.length || 0);
+      
+      // Validate and normalize voice structure
+      if (Array.isArray(availableVoices) && availableVoices.length > 0) {
+        // Ensure all voices have required fields
+        const normalizedVoices = availableVoices.map((voice: any) => {
+          // Handle different possible field names
+          const identifier = voice.identifier || voice.id || voice.voice || '';
+          const name = voice.name || voice.displayName || identifier || 'Unknown Voice';
+          const language = voice.language || voice.locale || 'en-US';
+          const quality = voice.quality || voice.qualityLevel;
+          
+          return {
+            identifier,
+            name,
+            language,
+            quality,
+          };
+        }).filter((voice: any) => voice.identifier); // Filter out invalid voices
+        
+        console.log('[RNSpeechVoiceSelector] Normalized voices:', normalizedVoices);
+        setVoices(normalizedVoices);
+        
+        // Check if currently selected voice is still available
+        if (selectedVoice) {
+          const isSelectedVoiceAvailable = normalizedVoices.some(v => v.identifier === selectedVoice);
+          if (!isSelectedVoiceAvailable) {
+            console.warn('[RNSpeechVoiceSelector] Selected voice not found in available voices:', selectedVoice);
+            console.log('[RNSpeechVoiceSelector] Available voice identifiers:', normalizedVoices.map(v => v.identifier));
+            // If selected voice is not available, clear it or select first available
+            if (normalizedVoices.length > 0) {
+              console.log('[RNSpeechVoiceSelector] Selecting first available voice instead');
+              onVoiceSelected(normalizedVoices[0].identifier);
+            } else {
+              onVoiceSelected(null);
+            }
+          } else {
+            console.log('[RNSpeechVoiceSelector] Selected voice is available:', selectedVoice);
+          }
+        } else if (normalizedVoices.length > 0) {
+          // Auto-select first voice if none selected
+          console.log('[RNSpeechVoiceSelector] Auto-selecting first voice:', normalizedVoices[0].identifier);
+          onVoiceSelected(normalizedVoices[0].identifier);
+        }
+      } else {
+        console.warn('[RNSpeechVoiceSelector] No voices returned or invalid format');
+        setVoices([]);
       }
     } catch (err) {
       console.error('[RNSpeechVoiceSelector] Error loading voices:', err);
@@ -38,7 +81,7 @@ function RNSpeechVoiceSelector({ selectedVoice, onVoiceSelected }: RNSpeechVoice
     } finally {
       setIsLoading(false);
     }
-  }, []);
+  }, [selectedVoice, onVoiceSelected]);
 
   useEffect(() => {
     loadVoices();
@@ -51,7 +94,17 @@ function RNSpeechVoiceSelector({ selectedVoice, onVoiceSelected }: RNSpeechVoice
     }
   }, [showModal, loadVoices]);
 
-  const selectedVoiceName = voices.find(v => v.identifier === selectedVoice)?.name || 'Default';
+  // Debug: Log selected voice changes
+  useEffect(() => {
+    console.log('[RNSpeechVoiceSelector] Selected voice changed:', selectedVoice);
+    if (selectedVoice && voices.length > 0) {
+      const found = voices.find(v => v.identifier === selectedVoice);
+      console.log('[RNSpeechVoiceSelector] Found voice in list:', found ? found.name : 'NOT FOUND');
+    }
+  }, [selectedVoice, voices]);
+
+  const selectedVoiceObj = voices.find(v => v.identifier === selectedVoice);
+  const selectedVoiceName = selectedVoiceObj?.name || (selectedVoice ? 'Unknown Voice' : 'None');
 
   return (
     <>
@@ -65,7 +118,7 @@ function RNSpeechVoiceSelector({ selectedVoice, onVoiceSelected }: RNSpeechVoice
               {selectedVoiceName}
             </Text>
             <Text style={styles.selectedVoiceType} numberOfLines={1}>
-              {voices.find(v => v.identifier === selectedVoice)?.language || 'System Voice'}
+              {selectedVoiceObj?.language || (selectedVoice ? 'Unknown' : 'No voice selected')}
             </Text>
           </View>
           <Text style={styles.chevron}>›</Text>
@@ -114,6 +167,7 @@ function RNSpeechVoiceSelector({ selectedVoice, onVoiceSelected }: RNSpeechVoice
                       selectedVoice === voice.identifier && styles.voiceOptionSelected,
                     ]}
                     onPress={() => {
+                      console.log('[RNSpeechVoiceSelector] Voice selected:', voice.identifier, voice.name);
                       onVoiceSelected(voice.identifier);
                       setShowModal(false);
                     }}

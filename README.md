@@ -22,6 +22,10 @@ Kokoro TTS Demo is a mobile application that demonstrates high-quality text-to-s
 - 🔄 Adjustable speech speed
 - 📊 Performance metrics for speech generation
 - 📦 Multiple model options with different size/quality tradeoffs
+- 🤖 **AI Assistant Mode** - Conversational AI powered by Qwen2.5-0.5B-Instruct LLM
+- 🎤 **Speech Recognition** - Voice input with real-time transcription
+- 💬 **Conversation History** - Persistent conversation storage using SQLite
+- 🎚️ **Dual TTS Engines** - Choose between Kokoro (ONNX) or Native TTS engines
 
 ## How It Works
 
@@ -39,8 +43,14 @@ Kokoro TTS uses a neural text-to-speech model converted to ONNX format, which al
 - **React Native**: Core framework for cross-platform mobile development
 - **Expo**: Development platform for React Native
 - **ONNX Runtime**: High-performance inference engine for ONNX models
-- **Expo AV**: Audio playback capabilities
+- **Expo Audio**: Audio playback capabilities
 - **Expo FileSystem**: File management for model and voice data
+- **@react-native-ai/mlc**: On-device LLM inference engine
+- **Qwen2.5-0.5B-Instruct**: Lightweight language model for AI assistant
+- **Expo Speech Recognition**: Voice input and transcription
+- **React Native Speech**: Native TTS engine alternative
+- **Expo SQLite**: Local conversation history storage
+- **Zustand**: State management
 
 ## Getting Started
 
@@ -80,11 +90,23 @@ npx eas build --platform ios --profile development
 
 ## Usage
 
-1. **Select a Model**: Choose from different model sizes based on your device capabilities
-2. **Download a Voice**: Select and download one of the available voices
-3. **Adjust Speed**: Set the speech rate using the speed controls
-4. **Enter Text**: Type or paste the text you want to convert to speech
-5. **Generate Speech**: Press the "Generate Speech" button to create and play the audio
+### Direct TTS Mode
+
+1. **Select TTS Engine**: Choose between Kokoro (ONNX) or Native TTS in Settings
+2. **Select a Model** (Kokoro only): Choose from different model sizes based on your device capabilities
+3. **Download a Voice**: Select and download one of the available voices
+4. **Adjust Speed**: Set the speech rate using the speed controls
+5. **Enter Text**: Type or paste the text you want to convert to speech
+6. **Generate Speech**: Press the "Generate Speech" button to create and play the audio
+
+### AI Assistant Mode
+
+1. **Enable AI Assistant**: Switch to "AI Assistant" mode in Settings
+2. **Wait for LLM**: The app will download and initialize the Qwen2.5-0.5B model (~600MB) on first use
+3. **Voice Input**: Tap the microphone button to speak your question
+4. **Automatic Response**: The AI will generate a response and speak it back using your selected TTS engine
+5. **Conversation History**: All conversations are saved locally and persist across app sessions
+6. **Clear History**: Use Settings to clear conversation history if needed
 
 ## Models
 
@@ -109,27 +131,66 @@ The app includes multiple voices with different characteristics:
 
 ### Project Structure
 
-- `/kokoro`: Core TTS implementation
+- `/app`: Expo Router application screens
+  - `index.tsx`: Main screen with TTS and AI Assistant interface
+  - `settings.tsx`: Settings and configuration screen
+  - `models.tsx`: Model selection and management
+  - `voices.tsx`: Voice selection and management
+- `/kokoro`: Core TTS and LLM implementation
   - `kokoroOnnx.ts`: Main TTS engine implementation
   - `models.ts`: Model management and downloading
   - `voices.ts`: Voice definitions and management
-- `App.tsx`: Main application UI
+  - `llmService.ts`: LLM service for AI Assistant mode
+- `/components`: Reusable UI components
+  - `SpeechRecognition.tsx`: Voice input component
+- `/store`: State management and data persistence
+  - `ttsStore.ts`: Zustand store for TTS settings
+  - `conversationDb.ts`: SQLite database for conversation history
+- `/utils`: Utility functions
+  - `speechWrapper.ts`: Unified TTS engine wrapper
 - `app.json`: Expo configuration
 - `metro.config.js`: Metro bundler configuration
 
 ### Key Components
 
-- **KokoroOnnx**: Main class that handles TTS functionality
-- **Model Management**: Functions for downloading and managing models
-- **Voice Management**: Functions for downloading and using voice data
-- **UI Components**: React Native components for the user interface
+- **KokoroOnnx**: Main class that handles Kokoro TTS functionality
+- **LLMService**: Singleton service for Qwen2.5-0.5B model management
+- **SpeechRecognition**: Component for voice input with real-time transcription
+- **generateSpeech**: Unified wrapper for both TTS engines
+- **ConversationDatabase**: SQLite-based conversation history storage
+- **TTSStore**: Zustand store managing TTS engine, voice, speed, and mode settings
 
 ## License
 
 This project is licensed under the MIT License - see the LICENSE file for details.
+
+## Modes
+
+### Direct TTS Mode
+Convert text directly to speech using your selected TTS engine. Perfect for reading text, accessibility, or simple text-to-speech needs.
+
+### AI Assistant Mode
+Engage in conversations with an on-device AI assistant. The assistant uses the Qwen2.5-0.5B-Instruct model to generate responses, which are then spoken using your selected TTS engine. All conversations are stored locally for context.
+
+## TTS Engines
+
+### Kokoro (ONNX)
+- High-quality neural TTS
+- Multiple voice options
+- Customizable speed control
+- Requires model download (~86MB for Q8F16)
+- Best for quality and customization
+
+### Native TTS
+- Uses device's built-in TTS engine
+- No model download required
+- Platform-native voices
+- Faster initialization
+- Best for quick setup and native integration
 
 ## Acknowledgments
 
 - ONNX Runtime team for the mobile inference engine
 - Expo team for the development platform
 - Contributors to the open-source TTS models
+- Qwen team for the Qwen2.5 language model
