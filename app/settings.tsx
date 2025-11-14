@@ -1,5 +1,5 @@
-import React, { useState, useEffect } from 'react';
-import { StyleSheet, Text, View, ScrollView, ActivityIndicator, Platform, Alert, TouchableOpacity } from 'react-native';
+import React, { useState, useEffect, useCallback } from 'react';
+import { StyleSheet, Text, View, ScrollView, ActivityIndicator, Platform, Alert, TouchableOpacity, Modal } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter, useFocusEffect } from 'expo-router';
 import { File, Directory, Paths } from 'expo-file-system';
@@ -9,6 +9,139 @@ import { MODELS, getDownloadedModels, downloadModel, isModelDownloaded } from '.
 import { useTTSStore } from '../store/ttsStore';
 import llmService from '../kokoro/llmService';
 import conversationDb from '../store/conversationDb';
+import Speech from '@mhpdev/react-native-speech';
+
+interface RNSpeechVoiceSelectorProps {
+  selectedVoice: string | null;
+  onVoiceSelected: (voice: string | null) => void;
+}
+
+function RNSpeechVoiceSelector({ selectedVoice, onVoiceSelected }: RNSpeechVoiceSelectorProps) {
+  const [voices, setVoices] = useState<Array<{ identifier: string; name: string; language: string; quality?: 'Default' | 'Enhanced' }>>([]);
+  const [isLoading, setIsLoading] = useState(true);
+  const [showModal, setShowModal] = useState(false);
+
+  const loadVoices = useCallback(async () => {
+    try {
+      setIsLoading(true);
+      console.log('[RNSpeechVoiceSelector] Loading voices...');
+      const availableVoices = await Speech.getAvailableVoices();
+      console.log('[RNSpeechVoiceSelector] Loaded voices:', availableVoices.length, availableVoices);
+      setVoices(availableVoices);
+      // Auto-select first voice if none selected
+      if (!selectedVoice && availableVoices.length > 0) {
+        onVoiceSelected(availableVoices[0].identifier);
+      }
+    } catch (err) {
+      console.error('[RNSpeechVoiceSelector] Error loading voices:', err);
+      setVoices([]);
+    } finally {
+      setIsLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    loadVoices();
+  }, [loadVoices]);
+
+  // Reload voices when modal opens
+  useEffect(() => {
+    if (showModal) {
+      loadVoices();
+    }
+  }, [showModal, loadVoices]);
+
+  const selectedVoiceName = voices.find(v => v.identifier === selectedVoice)?.name || 'Default';
+
+  return (
+    <>
+      <TouchableOpacity
+        style={styles.voiceSelectorCard}
+        onPress={() => setShowModal(true)}
+      >
+        <View style={styles.voiceSelectorContent}>
+          <View style={styles.voiceSelectorTextContainer}>
+            <Text style={styles.selectedVoiceName} numberOfLines={1}>
+              {selectedVoiceName}
+            </Text>
+            <Text style={styles.selectedVoiceType} numberOfLines={1}>
+              {voices.find(v => v.identifier === selectedVoice)?.language || 'System Voice'}
+            </Text>
+          </View>
+          <Text style={styles.chevron}>›</Text>
+        </View>
+      </TouchableOpacity>
+
+      <Modal
+        visible={showModal}
+        animationType="slide"
+        transparent={true}
+        onRequestClose={() => setShowModal(false)}
+      >
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalContent}>
+            <View style={styles.modalHeader}>
+              <Text style={styles.modalTitle}>Select Voice</Text>
+              <TouchableOpacity onPress={() => setShowModal(false)}>
+                <Text style={styles.modalCloseButton}>Done</Text>
+              </TouchableOpacity>
+            </View>
+            {isLoading ? (
+              <View style={styles.modalLoadingContainer}>
+                <ActivityIndicator size="small" color="#007AFF" />
+                <Text style={styles.modalLoadingText}>Loading voices...</Text>
+              </View>
+            ) : voices.length === 0 ? (
+              <View style={styles.modalEmptyContainer}>
+                <Text style={styles.modalEmptyText}>No voices available</Text>
+                <Text style={styles.modalEmptySubtext}>
+                  Please check your device's text-to-speech settings or try reloading.
+                </Text>
+                <TouchableOpacity
+                  style={styles.modalRetryButton}
+                  onPress={loadVoices}
+                >
+                  <Text style={styles.modalRetryButtonText}>Retry</Text>
+                </TouchableOpacity>
+              </View>
+            ) : (
+              <ScrollView style={styles.modalScrollView}>
+                {voices.map((voice) => (
+                  <TouchableOpacity
+                    key={voice.identifier}
+                    style={[
+                      styles.voiceOption,
+                      selectedVoice === voice.identifier && styles.voiceOptionSelected,
+                    ]}
+                    onPress={() => {
+                      onVoiceSelected(voice.identifier);
+                      setShowModal(false);
+                    }}
+                  >
+                    <View style={styles.voiceOptionContent}>
+                      <Text style={[
+                        styles.voiceOptionName,
+                        selectedVoice === voice.identifier && styles.voiceOptionNameSelected,
+                      ]}>
+                        {voice.name}
+                      </Text>
+                      <Text style={styles.voiceOptionLanguage}>
+                        {voice.language} {voice.quality && `• ${voice.quality}`}
+                      </Text>
+                    </View>
+                    {selectedVoice === voice.identifier && (
+                      <Text style={styles.checkmark}>✓</Text>
+                    )}
+                  </TouchableOpacity>
+                ))}
+              </ScrollView>
+            )}
+          </View>
+        </View>
+      </Modal>
+    </>
+  );
+}
 
 export default function Settings() {
   const router = useRouter();
@@ -29,6 +162,10 @@ export default function Settings() {
     setSpeed,
     isLLMMode,
     setIsLLMMode,
+    ttsEngine,
+    setTTSEngine,
+    rnSpeechVoice,
+    setRNSpeechVoice,
   } = useTTSStore();
   const [error, setError] = useState<string | null>(null);
   const [isInitializingModel, setIsInitializingModel] = useState(false);
@@ -225,70 +362,104 @@ export default function Settings() {
           </View>
         )}
         
-        {/* TTS Model Selection */}
+        {/* TTS Engine Selection */}
         <View style={styles.section}>
-          <Text style={styles.sectionTitle}>TTS Model</Text>
-          <TouchableOpacity
-            style={styles.modelSelectorCard}
-            onPress={() => router.push('/models')}
-          >
-            <View style={styles.modelSelectorContent}>
-              <View style={styles.modelSelectorTextContainer}>
-                <Text style={styles.modelSelectorText} numberOfLines={1}>
-                  {currentModelId 
-                    ? MODELS[currentModelId].name 
-                    : selectedModelId 
-                      ? MODELS[selectedModelId].name 
-                      : 'Select Model'}
-                </Text>
-                <Text style={styles.modelSelectorSubtext} numberOfLines={1}>
-                  {currentModelId 
-                    ? MODELS[currentModelId].size 
-                    : selectedModelId 
-                      ? MODELS[selectedModelId].size 
-                      : 'No model'}
+          <Text style={styles.sectionTitle}>TTS Engine</Text>
+          <View style={styles.modeToggleContainer}>
+            <TouchableOpacity
+              style={[styles.modeButton, ttsEngine === 'kokoro' && styles.modeButtonActive]}
+              onPress={() => setTTSEngine('kokoro')}
+            >
+              <Text style={[styles.modeButtonText, ttsEngine === 'kokoro' && styles.modeButtonTextActive]}>
+                Kokoro
+              </Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={[styles.modeButton, ttsEngine === 'react-native-speech' && styles.modeButtonActive]}
+              onPress={() => setTTSEngine('react-native-speech')}
+            >
+              <Text style={[styles.modeButtonText, ttsEngine === 'react-native-speech' && styles.modeButtonTextActive]}>
+                Native TTS
+              </Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+
+        {/* TTS Model Selection - Only show for Kokoro */}
+        {ttsEngine === 'kokoro' && (
+          <View style={styles.section}>
+            <Text style={styles.sectionTitle}>TTS Model</Text>
+            <TouchableOpacity
+              style={styles.modelSelectorCard}
+              onPress={() => router.push('/models')}
+            >
+              <View style={styles.modelSelectorContent}>
+                <View style={styles.modelSelectorTextContainer}>
+                  <Text style={styles.modelSelectorText} numberOfLines={1}>
+                    {currentModelId 
+                      ? MODELS[currentModelId].name 
+                      : selectedModelId 
+                        ? MODELS[selectedModelId].name 
+                        : 'Select Model'}
+                  </Text>
+                  <Text style={styles.modelSelectorSubtext} numberOfLines={1}>
+                    {currentModelId 
+                      ? MODELS[currentModelId].size 
+                      : selectedModelId 
+                        ? MODELS[selectedModelId].size 
+                        : 'No model'}
+                  </Text>
+                </View>
+                <Text style={styles.chevron}>›</Text>
+              </View>
+            </TouchableOpacity>
+            {(isInitializingModel || isDownloadingTTSModel) && (
+              <View style={styles.compactLoadingContainer}>
+                <ActivityIndicator size="small" color="#007AFF" />
+                <Text style={styles.compactLoadingText}>
+                  {isDownloadingTTSModel ? 'Downloading...' : 'Initializing...'}
                 </Text>
               </View>
-              <Text style={styles.chevron}>›</Text>
-            </View>
-          </TouchableOpacity>
-          {(isInitializingModel || isDownloadingTTSModel) && (
-            <View style={styles.compactLoadingContainer}>
-              <ActivityIndicator size="small" color="#007AFF" />
-              <Text style={styles.compactLoadingText}>
-                {isDownloadingTTSModel ? 'Downloading...' : 'Initializing...'}
-              </Text>
-            </View>
-          )}
-          {!isModelInitialized && !isInitializingModel && !isDownloadingTTSModel && (currentModelId || selectedModelId) && (
-            <Text style={styles.compactWarningText}>Not initialized</Text>
-          )}
-        </View>
+            )}
+            {!isModelInitialized && !isInitializingModel && !isDownloadingTTSModel && (currentModelId || selectedModelId) && (
+              <Text style={styles.compactWarningText}>Not initialized</Text>
+            )}
+          </View>
+        )}
 
         {/* Voice Selection */}
         <View style={styles.section}>
           <Text style={styles.sectionTitle}>Voice</Text>
-          <TouchableOpacity
-            style={styles.voiceSelectorCard}
-            onPress={async () => {
-              await router.push('/voices');
-              await checkDownloadedVoices();
-            }}
-          >
-            <View style={styles.voiceSelectorContent}>
-              <View style={styles.voiceSelectorTextContainer}>
-                <Text style={styles.selectedVoiceName} numberOfLines={1}>
-                  {getVoiceDisplayName(selectedVoice)}
-                </Text>
-                <Text style={styles.selectedVoiceType} numberOfLines={1}>
-                  {selectedVoice.startsWith('combined_') ? 'Combined' : 'Standard'}
-                </Text>
-              </View>
-              <Text style={styles.chevron}>›</Text>
-            </View>
-          </TouchableOpacity>
-          {!isVoiceAvailable(selectedVoice) && (
-            <Text style={styles.compactWarningText}>Not available</Text>
+          {ttsEngine === 'kokoro' ? (
+            <>
+              <TouchableOpacity
+                style={styles.voiceSelectorCard}
+                onPress={async () => {
+                  await router.push('/voices');
+                  await checkDownloadedVoices();
+                }}
+              >
+                <View style={styles.voiceSelectorContent}>
+                  <View style={styles.voiceSelectorTextContainer}>
+                    <Text style={styles.selectedVoiceName} numberOfLines={1}>
+                      {getVoiceDisplayName(selectedVoice)}
+                    </Text>
+                    <Text style={styles.selectedVoiceType} numberOfLines={1}>
+                      {selectedVoice.startsWith('combined_') ? 'Combined' : 'Standard'}
+                    </Text>
+                  </View>
+                  <Text style={styles.chevron}>›</Text>
+                </View>
+              </TouchableOpacity>
+              {!isVoiceAvailable(selectedVoice) && (
+                <Text style={styles.compactWarningText}>Not available</Text>
+              )}
+            </>
+          ) : (
+            <RNSpeechVoiceSelector
+              selectedVoice={rnSpeechVoice}
+              onVoiceSelected={setRNSpeechVoice}
+            />
           )}
         </View>
 
@@ -635,6 +806,112 @@ const styles = StyleSheet.create({
   clearButtonText: {
     fontSize: 16,
     color: '#ffffff',
+    fontWeight: '600',
+  },
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0, 0, 0, 0.5)',
+    justifyContent: 'flex-end',
+  },
+  modalContent: {
+    backgroundColor: '#ffffff',
+    borderTopLeftRadius: 20,
+    borderTopRightRadius: 20,
+    maxHeight: '80%',
+    paddingTop: 20,
+  },
+  modalHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingHorizontal: 20,
+    paddingBottom: 15,
+    borderBottomWidth: 1,
+    borderBottomColor: '#e5e5ea',
+  },
+  modalTitle: {
+    fontSize: 20,
+    fontWeight: 'bold',
+    color: '#1c1c1e',
+  },
+  modalCloseButton: {
+    fontSize: 16,
+    color: '#007AFF',
+    fontWeight: '600',
+  },
+  modalLoadingContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: 40,
+  },
+  modalLoadingText: {
+    fontSize: 14,
+    color: '#636366',
+    marginLeft: 8,
+  },
+  modalScrollView: {
+    maxHeight: 400,
+  },
+  voiceOption: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    padding: 15,
+    borderBottomWidth: 1,
+    borderBottomColor: '#f2f2f7',
+  },
+  voiceOptionSelected: {
+    backgroundColor: '#e3f2fd',
+  },
+  voiceOptionContent: {
+    flex: 1,
+  },
+  voiceOptionName: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: '#1c1c1e',
+    marginBottom: 4,
+  },
+  voiceOptionNameSelected: {
+    color: '#007AFF',
+  },
+  voiceOptionLanguage: {
+    fontSize: 12,
+    color: '#636366',
+  },
+  checkmark: {
+    fontSize: 18,
+    color: '#007AFF',
+    fontWeight: 'bold',
+    marginLeft: 10,
+  },
+  modalEmptyContainer: {
+    padding: 40,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  modalEmptyText: {
+    fontSize: 18,
+    fontWeight: '600',
+    color: '#1c1c1e',
+    marginBottom: 8,
+  },
+  modalEmptySubtext: {
+    fontSize: 14,
+    color: '#636366',
+    textAlign: 'center',
+    marginBottom: 20,
+  },
+  modalRetryButton: {
+    paddingHorizontal: 20,
+    paddingVertical: 10,
+    backgroundColor: '#007AFF',
+    borderRadius: 8,
+  },
+  modalRetryButtonText: {
+    color: '#ffffff',
+    fontSize: 16,
     fontWeight: '600',
   },
 });

@@ -32,6 +32,14 @@ interface TTSStore {
   setSpeed: (speed: number) => void;
   isLLMMode: boolean;
   setIsLLMMode: (isLLMMode: boolean) => void;
+  
+  // TTS Engine selection
+  ttsEngine: 'kokoro' | 'react-native-speech';
+  setTTSEngine: (engine: 'kokoro' | 'react-native-speech') => void;
+  
+  // React Native Speech voice
+  rnSpeechVoice: string | null;
+  setRNSpeechVoice: (voice: string | null) => void;
 }
 
 export const useTTSStore = create<TTSStore>((set) => ({
@@ -62,5 +70,13 @@ export const useTTSStore = create<TTSStore>((set) => ({
   setSpeed: (speed) => set({ speed }),
   isLLMMode: true,
   setIsLLMMode: (isLLMMode) => set({ isLLMMode }),
+  
+  // TTS Engine selection (default to kokoro to preserve current behavior)
+  ttsEngine: 'kokoro',
+  setTTSEngine: (engine) => set({ ttsEngine: engine }),
+  
+  // React Native Speech voice
+  rnSpeechVoice: null,
+  setRNSpeechVoice: (voice) => set({ rnSpeechVoice: voice }),
 }));
 

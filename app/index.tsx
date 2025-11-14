@@ -12,6 +12,7 @@ import { useTTSStore } from '../store/ttsStore';
 import SpeechRecognition from '../components/SpeechRecognition';
 import llmService from '../kokoro/llmService';
 import conversationDb from '../store/conversationDb';
+import { generateSpeech } from '../utils/speechWrapper';
 
 export default function Index() {
   const router = useRouter();
@@ -27,11 +28,10 @@ export default function Index() {
     setDownloadedModels,
     downloadedVoices,
     setDownloadedVoices,
-  } = useTTSStore();
-
-  const {
     speed,
     isLLMMode,
+    ttsEngine,
+    rnSpeechVoice,
   } = useTTSStore();
 
   const [error, setError] = useState<string | null>(null);
@@ -289,13 +289,16 @@ export default function Index() {
     try {
       setIsGeneratingAudio(true);
       
-      // Generate and stream audio
-      await KokoroOnnx.streamAudio(
-        textToSpeak,
-        selectedVoice,
-        speed,
-        () => {} // Progress callback (not used currently)
-      );
+      // Use the unified speech wrapper that handles both engines
+      await generateSpeech({
+        engine: ttsEngine,
+        text: textToSpeak,
+        kokoroVoice: selectedVoice,
+        kokoroSpeed: speed,
+        rnSpeechVoice: rnSpeechVoice,
+        rnSpeechSpeed: speed, // Map speed to react-native-speech rate (0.0-1.0, where 1.0 is normal)
+        onProgress: () => {}, // Progress callback (not used currently)
+      });
       
       setIsGeneratingAudio(false);
     } catch (err) {
@@ -339,11 +342,9 @@ export default function Index() {
           {/* Current Settings Summary - Simple Row */}
           <View style={styles.settingsSummaryRow}>
             <Text style={styles.settingsSummaryText}>
-              {currentModelId 
-                ? MODELS[currentModelId].name 
-                : selectedModelId 
-                  ? MODELS[selectedModelId].name 
-                  : 'Not set'} • {getVoiceDisplayName(selectedVoice)} • {speed.toFixed(1)}x • {isLLMMode ? 'AI' : 'TTS'}
+              {ttsEngine === 'kokoro' 
+                ? `${currentModelId ? MODELS[currentModelId].name : selectedModelId ? MODELS[selectedModelId].name : 'Not set'} • ${getVoiceDisplayName(selectedVoice)}`
+                : 'Native TTS'} • {speed.toFixed(1)}x • {isLLMMode ? 'AI' : 'TTS'}
             </Text>
             <TouchableOpacity 
               onPress={() => router.push('/settings')}
@@ -415,7 +416,9 @@ export default function Index() {
         {/* Fixed microphone button at bottom */}
         <View style={styles.fixedMicrophoneContainer}>
           <SpeechRecognition
-            isReady={isLLMMode ? (isLLMReady && isModelInitialized && isVoiceAvailable(selectedVoice)) : (isModelInitialized && isVoiceAvailable(selectedVoice))}
+            isReady={isLLMMode 
+              ? (isLLMReady && (ttsEngine === 'react-native-speech' || (isModelInitialized && isVoiceAvailable(selectedVoice))))
+              : (ttsEngine === 'react-native-speech' || (isModelInitialized && isVoiceAvailable(selectedVoice)))}
             isGeneratingResponse={isGeneratingResponse}
             llmStatus={isLLMMode ? {
               isInitializing: isLLMInitializing,
@@ -476,7 +479,7 @@ export default function Index() {
                   return;
                 }
                 
-                if (!isModelInitialized || !isVoiceAvailable(selectedVoice)) {
+                if (ttsEngine === 'kokoro' && (!isModelInitialized || !isVoiceAvailable(selectedVoice))) {
                   Alert.alert(
                     'TTS Not Ready',
                     'Please ensure the TTS model is initialized and voice is downloaded.'
@@ -505,7 +508,7 @@ export default function Index() {
                 }
               } else {
                 // Direct TTS Mode: convert transcribed text to speech
-                if (isModelInitialized && isVoiceAvailable(selectedVoice)) {
+                if (ttsEngine === 'react-native-speech' || (isModelInitialized && isVoiceAvailable(selectedVoice))) {
                   await generateAndPlaySpeech(transcribedText);
                 } else {
                   Alert.alert(
@@ -515,7 +518,9 @@ export default function Index() {
                 }
               }
             }}
-            disabled={isLLMMode ? (!isLLMReady || !isModelInitialized || !isVoiceAvailable(selectedVoice) || isGeneratingResponse) : (!isModelInitialized || !isVoiceAvailable(selectedVoice) || isGeneratingResponse)}
+            disabled={isLLMMode 
+              ? (!isLLMReady || (ttsEngine === 'kokoro' && (!isModelInitialized || !isVoiceAvailable(selectedVoice))) || isGeneratingResponse)
+              : ((ttsEngine === 'kokoro' && (!isModelInitialized || !isVoiceAvailable(selectedVoice))) || isGeneratingResponse)}
           />
         </View>
      </KeyboardAvoidingView>
